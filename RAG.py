@@ -4,8 +4,9 @@ from typing import List, Dict, Any
 import pandas as pd
 from scipy import sparse
 import PyPDF2
+import glob
 
-MANUAL_PDF  = os.getenv("TM_MANUAL_PDF", "C:\Dev\KorailPJT\data\견인전동기.pdf")
+DATA_DIR    = os.getenv("TM_DATA_DIR", "C:\Dev\KorailPJT\data")
 PARSED_DIR  = os.getenv("TM_PARSED_DIR", "C:\Dev\KorailPJT\parsed")
 INDEX_DIR   = os.getenv("TM_INDEX_DIR",  "C:\Dev\KorailPJT\index")
 os.makedirs(PARSED_DIR, exist_ok=True)
@@ -20,8 +21,8 @@ def _parse_pdf_to_text_pages(pdf_path: str) -> List[str]:
             for p in pdf.pages:
                 pages.append(p.extract_text() or "")
         if pages: return pages
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"pdfplumber failed for {pdf_path}: {e}")
     # 2) PyMuPDF
     try:
         import fitz
@@ -29,29 +30,41 @@ def _parse_pdf_to_text_pages(pdf_path: str) -> List[str]:
         for i in range(doc.page_count):
             pages.append(doc.load_page(i).get_text())
         if pages: return pages
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"PyMuPDF failed for {pdf_path}: {e}")
     # 3) PyPDF2
     try:
-        import PyPDF2
         reader = PyPDF2.PdfReader(pdf_path)
         for p in reader.pages:
             pages.append(p.extract_text() or "")
         if pages: return pages
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"PyPDF2 failed for {pdf_path}: {e}")
     return pages
 
-def step1_parse_pdf(save: bool = True) -> int:
-    if not os.path.exists(MANUAL_PDF):
-        raise FileNotFoundError(f"PDF가 없습니다: {MANUAL_PDF}")
-    pages = _parse_pdf_to_text_pages(MANUAL_PDF)
-    if not pages:
-        raise RuntimeError("PDF에서 텍스트를 추출하지 못했습니다.")
+def step1_parse_pdf(save: bool = True) -> Dict[str, int]:
+    pdf_files = glob.glob(os.path.join(DATA_DIR, "*.pdf"))
+    if not pdf_files:
+        raise FileNotFoundError(f"No PDFs found in: {DATA_DIR}")
+    
+    pdf_pages = {}
+    for pdf_path in pdf_files:
+        pages = _parse_pdf_to_text_pages(pdf_path)
+        if not pages:
+            print(f"Warning: Could not extract text from {pdf_path}")
+            continue
+        pdf_name = os.path.basename(pdf_path)
+        pdf_pages[pdf_name] = pages
+    
+    if not pdf_pages:
+        raise RuntimeError("No text extracted from any PDFs.")
+    
     if save:
-        with open(os.path.join(PARSED_DIR, "pages.pkl"), "wb") as f:
-            pickle.dump(pages, f)
-    return len(pages)
+        for pdf_name, pages in pdf_pages.items():
+            with open(os.path.join(PARSED_DIR, f"{pdf_name}_pages.pkl"), "wb") as f:
+                pickle.dump(pages, f)
+    
+    return {pdf_name: len(pages) for pdf_name, pages in pdf_pages.items()}
 
 # ===== 2) 섹션/표/안전 청크 =====
 SECTION_RE = re.compile(r"(?m)^(?P<num>\d+(?:\.\d+)+)\s*(?P<title>[^\n]+)")
@@ -59,6 +72,7 @@ SECTION_RE = re.compile(r"(?m)^(?P<num>\d+(?:\.\d+)+)\s*(?P<title>[^\n]+)")
 @dataclass
 class Chunk:
     chunk_id: int
+    pdf_name: str
     section_id: str
     title: str
     page_start: int
@@ -66,52 +80,90 @@ class Chunk:
     type: str   # "procedure"|"table"|"safety"|"misc"
     text: str
 
-def _load_pages() -> List[str]:
-    pkl = os.path.join(PARSED_DIR, "pages.pkl")
-    if not os.path.exists(pkl):
+def _load_pages() -> Dict[str, List[str]]:
+    pdf_pages = {}
+    for pkl_file in glob.glob(os.path.join(PARSED_DIR, "*_pages.pkl")):
+        pdf_name = os.path.basename(pkl_file).replace("_pages.pkl", "")
+        with open(pkl_file, "rb") as f:
+            pdf_pages[pdf_name] = pickle.load(f)
+    if not pdf_pages:
         step1_parse_pdf(save=True)
-    with open(pkl, "rb") as f:
-        return pickle.load(f)
+        for pkl_file in glob.glob(os.path.join(PARSED_DIR, "*_pages.pkl")):
+            pdf_name = os.path.basename(pkl_file).replace("_pages.pkl", "")
+            with open(pkl_file, "rb") as f:
+                pdf_pages[pdf_name] = pickle.load(f)
+    return pdf_pages
 
 def step2_build_chunks(save: bool = True) -> int:
-    pages = _load_pages()
-    # 페이지 연결
-    offsets, joined, total = [], [], 0
-    for t in pages:
-        t = t if isinstance(t, str) else ""
-        joined.append(t); offsets.append(total); total += len(t) + 1
-    joined_s = "\n".join(joined)
-    def pos_to_page(pos: int) -> int:
-        for p, off in enumerate(offsets):
-            if p+1 == len(offsets): return p
-            if offsets[p] <= pos < offsets[p+1]: return p
-        return len(offsets)-1
-
+    pdf_pages = _load_pages()
     chunks: List[Chunk] = []
-    matches = list(SECTION_RE.finditer(joined_s))
-    for i, m in enumerate(matches):
-        start = m.end()
-        end = matches[i+1].start() if i+1 < len(matches) else len(joined_s)
-        body = joined_s[start:end].strip()
-        if len(body) < 50: 
-            continue
-        p_start = pos_to_page(start)+1
-        p_end   = pos_to_page(end)+1
-        chunks.append(Chunk(
-            chunk_id=len(chunks),
-            section_id=m.group("num"),
-            title=m.group("title").strip(),
-            page_start=p_start, page_end=p_end,
-            type="procedure",
-            text=body
-        ))
-    # 표/수치/안전 힌트
-    for i, page in enumerate(pages, start=1):
-        text = page or ""
-        if any(k in text for k in ["유  형 원  인 조  치", "사  양", "규격", "MΩ", "N.m", " g "]):
-            chunks.append(Chunk(len(chunks), f"P{i}", "표/수치/규격(heuristic)", i, i, "table", text))
-        if any(k in text for k in ["경고", "주의", "위험", "660 kg", "660kg"]):
-            chunks.append(Chunk(len(chunks), f"P{i}", "안전문구(heuristic)", i, i, "safety", text))
+    chunk_id = 0
+
+    for pdf_name, pages in pdf_pages.items():
+        # 페이지 연결
+        offsets, joined, total = [], [], 0
+        for t in pages:
+            t = t if isinstance(t, str) else ""
+            joined.append(t)
+            offsets.append(total)
+            total += len(t) + 1
+        joined_s = "\n".join(joined)
+        
+        def pos_to_page(pos: int) -> int:
+            for p, off in enumerate(offsets):
+                if p + 1 == len(offsets): return p
+                if offsets[p] <= pos < offsets[p + 1]: return p
+            return len(offsets) - 1
+
+        # 섹션 추출
+        matches = list(SECTION_RE.finditer(joined_s))
+        for i, m in enumerate(matches):
+            start = m.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(joined_s)
+            body = joined_s[start:end].strip()
+            if len(body) < 50:
+                continue
+            p_start = pos_to_page(start) + 1
+            p_end = pos_to_page(end) + 1
+            chunks.append(Chunk(
+                chunk_id=chunk_id,
+                pdf_name=pdf_name,
+                section_id=m.group("num"),
+                title=m.group("title").strip(),
+                page_start=p_start,
+                page_end=p_end,
+                type="procedure",
+                text=body
+            ))
+            chunk_id += 1
+
+        # 표/수치/안전 힌트
+        for i, page in enumerate(pages, start=1):
+            text = page or ""
+            if any(k in text for k in ["유  형 원  인 조  치", "사  양", "규격", "MΩ", "N.m", " g "]):
+                chunks.append(Chunk(
+                    chunk_id=chunk_id,
+                    pdf_name=pdf_name,
+                    section_id=f"P{i}",
+                    title="표/수치/규격(heuristic)",
+                    page_start=i,
+                    page_end=i,
+                    type="table",
+                    text=text
+                ))
+                chunk_id += 1
+            if any(k in text for k in ["경고", "주의", "위험", "660 kg", "660kg"]):
+                chunks.append(Chunk(
+                    chunk_id=chunk_id,
+                    pdf_name=pdf_name,
+                    section_id=f"P{i}",
+                    title="안전문구(heuristic)",
+                    page_start=i,
+                    page_end=i,
+                    type="safety",
+                    text=text
+                ))
+                chunk_id += 1
 
     df = pd.DataFrame([asdict(c) for c in chunks])
     if save:
@@ -138,12 +190,11 @@ def step3_build_index(save: bool = True) -> str:
     return INDEX_DIR
 
 def _ensure_index():
-    need = ["meta.pkl","vectorizer.pkl","matrix.npz"]
+    need = ["meta.pkl", "vectorizer.pkl", "matrix.npz"]
     if all(os.path.exists(os.path.join(INDEX_DIR, f)) for f in need):
         return
-    # 없으면 앞 단계부터 자동 실행
     if not os.path.exists(os.path.join(PARSED_DIR, "chunks.csv")):
-        if not os.path.exists(os.path.join(PARSED_DIR, "pages.pkl")):
+        if not glob.glob(os.path.join(PARSED_DIR, "*_pages.pkl")):
             step1_parse_pdf(save=True)
         step2_build_chunks(save=True)
     step3_build_index(save=True)
@@ -161,7 +212,7 @@ def step4_retrieve(query: str, top_k: int = 5) -> pd.DataFrame:
     out = df.iloc[idx].copy()
     out["score"] = sims[idx]
     out["preview"] = out["text"].str.replace("\n", " ").str.slice(0, 200) + "..."
-    return out[["score","section_id","title","type","page_start","page_end","preview"]]
+    return out[["score", "pdf_name", "section_id", "title", "type", "page_start", "page_end", "preview"]]
 
 # ===== 5) 작업카드 생성(숫자 강제 인용) =====
 NUM_PATS = {
@@ -192,36 +243,37 @@ def step5_generate_workcard(query: str, top_k: int = 8) -> Dict[str, Any]:
     refs = []
     for _, row in hits.iterrows():
         mask = (
+            (df["pdf_name"] == row["pdf_name"]) &
             (df["section_id"] == row["section_id"]) &
             (df["page_start"] == row["page_start"]) &
             (df["page_end"] == row["page_end"])
         )
         txt = df.loc[mask, "text"]
         if len(txt): merged += "\n" + str(txt.values[0])
-        refs.append({"section_id": row["section_id"], "pages": [int(row["page_start"]), int(row["page_end"])], "type": row["type"]})
+        refs.append({"pdf_name": row["pdf_name"], "section_id": row["section_id"], "pages": [int(row["page_start"]), int(row["page_end"])], "type": row["type"]})
     nums = _extract_numbers(merged)
 
     safety = ["고전압 작업 전 차단·방전"]
     for _, r in df[df["type"]=="safety"].iterrows():
         if "660 kg" in r["text"] or "660kg" in r["text"]:
-            safety.append("견인전동기 중량(660 kg) 취급 주의")
+            safety.append(f"견인전동기 중량(660 kg) 취급 주의 ({r['pdf_name']})")
             break
 
     actions = []
     if "베어링" in query or "그리스" in query:
         g = (nums.get("grease_g") or ["5"])[0]
-        actions.append({"step": 1, "text": f"그리스 주입구 청결 확인 후, Mobilith SHC 100을 각 베어링에 {g} g 주입한다(정지 상태).", "refs":[r["section_id"] for r in refs]})
+        actions.append({"step": 1, "text": f"그리스 주입구 청결 확인 후, Mobilith SHC 100을 각 베어링에 {g} g 주입한다(정지 상태).", "refs": [f"{r['pdf_name']}:{r['section_id']}" for r in refs]})
     if "절연저항" in query or "과열" in query:
         v = (nums.get("voltage_V") or ["1000"])[0]
         r = (nums.get("resistance_MOhm") or ["50"])[0]
-        actions.append({"step": len(actions)+1, "text": f"절연저항계를 {v} V로 설정하여 측정하고 기준 {r} MΩ 이상 여부를 확인한다.", "refs":[r["section_id"] for r in refs]})
+        actions.append({"step": len(actions)+1, "text": f"절연저항계를 {v} V로 설정하여 측정하고 기준 {r} MΩ 이상 여부를 확인한다.", "refs": [f"{r['pdf_name']}:{r['section_id']}" for r in refs]})
     if "토크" in query:
         ts = sorted(set(nums.get("torque_Nm") or []))
         if ts:
-            actions.append({"step": len(actions)+1, "text":"체결부를 규정 토크로 조인다: " + ", ".join(ts) + " N·m", "refs":[r["section_id"] for r in refs]})
+            actions.append({"step": len(actions)+1, "text": "체결부를 규정 토크로 조인다: " + ", ".join(ts) + " N·m", "refs": [f"{r['pdf_name']}:{r['section_id']}" for r in refs]})
 
     card = {
-        "asset": {"device":"traction_motor"},
+        "asset": {"device": "traction_motor"},
         "diagnosis": {"from_query": query},
         "actions": actions,
         "tests": [],

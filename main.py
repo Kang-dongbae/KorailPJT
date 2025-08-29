@@ -17,7 +17,7 @@ OUTPUT_CARD_PATH = "outputs/cards/tm_card.json"
 def main():
     print("\n=== STEP1: PDF 파싱 ===")
     pages = rag.step1_parse_pdf(save=True)
-    print(f"[STEP1] pages: {pages}")
+    print(f"[STEP1] pages: {pages}\n")
 
     print("\n=== STEP2: 섹션/표/안전 청크 생성 ===")
     chunks = rag.step2_build_chunks(save=True)
@@ -26,7 +26,7 @@ def main():
     print("\n=== STEP3: TF-IDF 인덱스 생성 ===")
     idx_dir = rag.step3_build_index(save=True)
     print(f"[STEP3] index built at: {idx_dir}")
-
+'''
     print("\n=== STEP4: 검색 데모 ===")
     df = rag.step4_retrieve(STEP4_QUERY, top_k=TOPK_RETRIEVE)
     print(f"[STEP4] query: {STEP4_QUERY}")
@@ -44,6 +44,7 @@ def main():
 
 
     print("\n✅ Done. (5차 실행 완료)")
+    '''
 
 if __name__ == "__main__":
     main() 
