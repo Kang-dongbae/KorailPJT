@@ -4,8 +4,8 @@ import rag  # 같은 폴더의 rag.py 사용
 import pickle
 from report import show_retrieval, show_workcard, save_card_md, save_card_html
 
-INDEX_DIR   = os.getenv("TM_INDEX_DIR",  "C:\Dev\KorailPJT\index")
-PARSED_DIR  = os.getenv("TM_PARSED_DIR", "C:\Dev\KorailPJT\parsed")
+INDEX_DIR   = os.getenv("TM_INDEX_DIR",  r"C:\Dev\KorailPJT\index")
+PARSED_DIR  = os.getenv("TM_PARSED_DIR", r"C:\Dev\KorailPJT\parsed")
 
 # ====== 하드코딩 설정 ======
 STEP4_QUERY = "베어링 과열 그리스 Mobilith SHC 100 5 g"
