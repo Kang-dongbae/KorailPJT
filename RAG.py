@@ -313,7 +313,7 @@ def build_device_lexicons(top_n: int=80) -> Dict[str, List[str]]:
     by_dev = df.groupby("device_id")["text"].apply(lambda s: "\n".join(s.fillna("")))
     all_txt = "\n".join(df["text"].fillna(""))
 
-    vectorizer = TfidfVectorizer(analyzer="word", ngram_range=(1,2), min_df=3, max_df=0.9)
+    vectorizer = TfidfVectorizer(analyzer="word", ngram_range=(1,2), min_df=1, max_df=1.0)
     V_all = vectorizer.fit_transform([_apply_synonyms(_norm_text(all_txt))])
     vocab = vectorizer.get_feature_names_out()
 
@@ -372,7 +372,9 @@ def _retrieve_core(queries: List[str], top_k: int=8, tfidf_w=TFIDF_WEIGHT, bm25_
 
     # TF-IDF
     qv = vectorizer.transform(queries)
-    sims = linear_kernel(qv, X).toarray()  # (Q,N)
+    sims = linear_kernel(qv, X)
+    if hasattr(sims, "toarray"):
+        sims = sims.toarray()
 
     # BM25
     if bm25_obj is not None:
